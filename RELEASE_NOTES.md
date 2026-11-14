@@ -1,4 +1,6 @@
-Simple Share 0.1.0 lets any phone, tablet or computer on your network send files to this computer and download files from it, in the browser, with no app to install on the phone.
+**New in 0.1.1:** Settings looks right again. The "Stop sharing after", "Largest file accepted", "Theme" and "Port" boxes no longer stretch across the whole row and squeeze their labels into a narrow column.
+
+Simple Share lets any phone, tablet or computer on your network send files to this computer and download files from it, in the browser, with no app to install on the phone.
 
 **Security:** every connection is HTTPS. Each device must be allowed on the computer before it can do anything, and access ends when sharing stops. Phones you pair (install the computer's certificate once) get a verified connection with no warning; that certificate can only vouch for private network addresses, never websites. Received files are never overwritten and are reported as saved only once they are on disk, with a SHA-256 shown on both screens. No account, cloud service or telemetry.
 

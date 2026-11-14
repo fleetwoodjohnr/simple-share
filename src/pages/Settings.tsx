@@ -60,7 +60,8 @@ export function SettingsPage() {
     setError(null);
     saveSettings(patch).catch((e) => setError(errorText(e)));
   };
-  const select = `${inputClass} w-auto`;
+  // Tailwind orders utilities by its own stylesheet, so w-full would beat an added w-auto.
+  const select = inputClass.replace("w-full", "w-auto");
   const updating = updates.state === "downloading" || updates.state === "installing";
 
   return (
@@ -127,7 +128,7 @@ export function SettingsPage() {
         </Row>
         <Row label="Port" hint="Change it only if another program uses this one. Takes effect next time you start sharing.">
           <input
-            className={`${inputClass} w-24 font-mono`}
+            className={`${inputClass.replace("w-full", "w-24")} font-mono`}
             inputMode="numeric"
             value={port}
             onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}

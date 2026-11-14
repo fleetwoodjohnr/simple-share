@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": {
+        "depends": ["libayatana-appindicator3-1 | libappindicator3-1"]
+      },
+      "rpm": {
+        "depends": ["(libayatana-appindicator-gtk3 or libappindicator-gtk3)"]
+      }
+    }
+  }
+}

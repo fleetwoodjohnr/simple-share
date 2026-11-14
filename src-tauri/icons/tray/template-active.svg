@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- macOS menu-bar template while sharing: the card filled, arrows cut out. -->
+  <defs>
+    <mask id="cut">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M400 696V328M304 424L400 328L496 424M624 328V696M528 600L624 696L720 600" fill="none" stroke="#000" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <rect x="68" y="68" width="888" height="888" rx="216" fill="#000" mask="url(#cut)"/>
+</svg>

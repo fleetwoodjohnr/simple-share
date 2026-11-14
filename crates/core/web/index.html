@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Simple Share</title>
+    <link rel="icon" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <img src="/icon.svg" alt="" width="36" height="36" />
+      <div>
+        <h1>Simple Share</h1>
+        <p id="peer" class="muted">Connecting…</p>
+      </div>
+    </header>
+
+    <main>
+      <section id="wait" class="center" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <h2>Waiting for approval</h2>
+        <p class="muted">Choose <b>Allow</b> on <b id="wait-name">the computer</b> to connect this device.</p>
+      </section>
+
+      <section id="denied" class="center" hidden>
+        <h2>Not allowed</h2>
+        <p class="muted">The computer did not allow this device. Scan the code again to ask once more.</p>
+      </section>
+
+      <section id="gone" class="center" hidden>
+        <h2 id="gone-title">Sharing has ended</h2>
+        <p id="gone-text" class="muted">Start sharing on the computer and scan the new code.</p>
+      </section>
+
+      <div id="ready" hidden>
+        <section class="card">
+          <h2>Send to <span id="to-name"></span></h2>
+          <label class="button primary" for="pick">Choose photos or files</label>
+          <input id="pick" type="file" multiple hidden />
+          <ul id="uploads" class="list"></ul>
+        </section>
+
+        <section class="card">
+          <h2>From <span id="from-name"></span></h2>
+          <p id="no-offers" class="muted">Files shared from the computer appear here.</p>
+          <ul id="offers" class="list"></ul>
+        </section>
+
+        <details class="card">
+          <summary>Stop the security warning on this device</summary>
+          <p class="muted">Install the computer's certificate once. After that this device gets a verified connection with no warning.</p>
+          <p><b>iPhone and iPad</b></p>
+          <ol class="muted">
+            <li>Tap <b>Download certificate</b>, then <b>Allow</b> and <b>Close</b>.</li>
+            <li>Open Settings → <b>Profile Downloaded</b> → <b>Install</b>.</li>
+            <li>Settings → General → About → <b>Certificate Trust Settings</b> → turn on <b>Simple Share local certificate</b>.</li>
+            <li>Check it is really the computer's: in Settings → General → VPN &amp; Device Management → the profile → <b>More Details</b>, the SHA-256 must match the code on the computer under Settings → Pairing.</li>
+          </ol>
+          <p><b>Android</b></p>
+          <ol class="muted">
+            <li>Tap <b>Download certificate</b>.</li>
+            <li>Settings → Security → Encryption &amp; credentials → Install a certificate → <b>CA certificate</b>, then pick the file.</li>
+          </ol>
+          <a class="button" href="/ca.cer">Download certificate</a>
+        </details>
+      </div>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Tray icon while sharing (Windows/Linux): the app tile, filled edge to edge and simplified for 16–32 px. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3fd6b4"/>
+      <stop offset=".5" stop-color="#16a2a0"/>
+      <stop offset="1" stop-color="#0f5470"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
+  <rect x="200" y="200" width="624" height="624" rx="128" fill="#fff"/>
+  <path d="M400 680V344M312 432L400 344L488 432M624 344V680M536 592L624 680L712 592" fill="none" stroke="#11607a" stroke-width="84" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- sharing on: the suite's "ok" colour -->
+  <circle cx="824" cy="200" r="196" fill="#3fc79a" stroke="#0b3a33" stroke-width="40"/>
+</svg>

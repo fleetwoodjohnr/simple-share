@@ -1,0 +1,187 @@
+/* Simple Suite tokens (same palette as the desktop app). */
+:root {
+  color-scheme: light;
+  --ink: #f5f7fa;
+  --panel: #ffffff;
+  --hover: #e2e7ee;
+  --line: #d7dde5;
+  --text: #18202a;
+  --muted: #566270;
+  --accent: #1f73b7;
+  --accent-ink: #ffffff;
+  --accent-soft: rgb(31 115 183 / 0.12);
+  --ok: #17855f;
+  --bad: #c62f2f;
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ink: #121820;
+    --panel: #19202a;
+    --hover: #29323f;
+    --line: #2a3441;
+    --text: #e3e8ee;
+    --muted: #8a97a6;
+    --accent: #6cb4ee;
+    --accent-ink: #0b1a26;
+    --accent-soft: rgb(108 180 238 / 0.14);
+    --ok: #3fc79a;
+    --bad: #ef5a5a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font: 16px/1.45 -apple-system, system-ui, "IBM Plex Sans", sans-serif;
+  -webkit-text-size-adjust: 100%;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  max-width: 560px;
+  margin: 0 auto;
+}
+h1 {
+  font-size: 1.125rem;
+  margin: 0;
+}
+h2 {
+  font-size: 1rem;
+  margin: 0 0 12px;
+}
+p {
+  margin: 0 0 8px;
+}
+ol {
+  padding-left: 20px;
+  margin: 0 0 12px;
+}
+li {
+  margin-bottom: 6px;
+}
+main {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+}
+.muted {
+  color: var(--muted);
+}
+.center {
+  text-align: center;
+  padding: 48px 16px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+details[open] summary {
+  margin-bottom: 12px;
+}
+.button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  width: 100%;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.button.small {
+  min-height: 36px;
+  width: auto;
+  font-size: 0.875rem;
+}
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+.list li {
+  border-top: 1px solid var(--line);
+  padding: 12px 0 0;
+  margin: 12px 0 0;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.meta {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  margin: 4px 0 0;
+}
+.meta.ok {
+  color: var(--ok);
+}
+.meta.bad {
+  color: var(--bad);
+}
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+progress {
+  width: 100%;
+  height: 6px;
+  margin-top: 8px;
+  accent-color: var(--accent);
+}
+.spinner {
+  width: 32px;
+  height: 32px;
+  margin: 0 auto 16px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}

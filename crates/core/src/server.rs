@@ -878,13 +878,15 @@ mod tests {
     #[tokio::test]
     async fn connections_to_other_addresses_are_dropped() {
         use axum_server::accept::Accept;
-        // Listening on every address, as on macOS for port 443; the share is on 127.0.0.1.
+        // Listening on every address, as on macOS for port 443.
         let l = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("bind");
         let port = l.local_addr().expect("addr").port();
-        for (to, ok) in [("127.0.0.1", true), ("127.0.0.2", false)] {
-            let _c = tokio::net::TcpStream::connect((to, port)).await.expect("connect");
+        // Every connection arrives at 127.0.0.1 (the only loopback address macOS has);
+        // it is kept only when that is the shared address.
+        for (shared, ok) in [("127.0.0.1", true), ("192.168.1.20", false)] {
+            let _c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
             let (s, _) = l.accept().await.expect("accept");
-            assert_eq!(OnlyTo("127.0.0.1".parse().expect("ip")).accept(s, ()).await.is_ok(), ok, "{to}");
+            assert_eq!(OnlyTo(shared.parse().expect("ip")).accept(s, ()).await.is_ok(), ok, "{shared}");
         }
     }
 

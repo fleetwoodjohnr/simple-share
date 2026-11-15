@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged into the app bundle by Tauri. macOS 15 asks before an app may use the local network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Simple Share answers to its .local address on your network while sharing is on, so your phones can find this computer.</string>
+</dict>
+</plist>

@@ -185,3 +185,18 @@ progress {
     animation: none;
   }
 }
+.code {
+  margin-top: 16px;
+  font: 600 2rem/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+.note {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  font-size: 0.875rem;
+}
+.note b {
+  word-break: break-all;
+}

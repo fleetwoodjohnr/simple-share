@@ -23,7 +23,8 @@
       <section id="wait" class="center" hidden>
         <div class="spinner" aria-hidden="true"></div>
         <h2>Waiting for approval</h2>
-        <p class="muted">Choose <b>Allow</b> on <b id="wait-name">the computer</b> to connect this device.</p>
+        <p class="muted">Choose <b>Allow</b> on <b id="wait-name">the computer</b> to connect this device. It should show the same code:</p>
+        <p id="wait-code" class="code"></p>
       </section>
 
       <section id="denied" class="center" hidden>
@@ -37,6 +38,9 @@
       </section>
 
       <div id="ready" hidden>
+        <p id="remembered" class="note" hidden>
+          This device is remembered. Bookmark <b id="address"></b> to connect again without scanning, whenever sharing is on.
+        </p>
         <section class="card">
           <h2>Send to <span id="to-name"></span></h2>
           <label class="button primary" for="pick">Choose photos or files</label>
@@ -52,7 +56,10 @@
 
         <details class="card">
           <summary>Stop the security warning on this device</summary>
-          <p class="muted">Install the computer's certificate once. After that this device gets a verified connection with no warning.</p>
+          <p class="muted">
+            Install the computer's certificate once. After that this device gets a verified connection with no warning, and refuses any other certificate for
+            this address, so nobody on the network can listen in or change your files. The certificate only works for this computer, never for websites.
+          </p>
           <p><b>iPhone and iPad</b></p>
           <ol class="muted">
             <li>Tap <b>Download certificate</b>, then <b>Allow</b> and <b>Close</b>.</li>

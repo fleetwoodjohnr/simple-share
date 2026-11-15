@@ -3,7 +3,7 @@
   "productName": "Simple Share",
   "mainBinaryName": "simple-share",
   "identifier": "dev.simpleshare.app",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

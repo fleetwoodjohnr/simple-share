@@ -11,15 +11,17 @@ const TIMEOUT_S = 120;
 export function DeviceDialog() {
   const pending = useApp((s) => s.view?.devices.find((d) => d.status === "pending"));
   const [left, setLeft] = useState(TIMEOUT_S);
+  const [remember, setRemember] = useState(true);
   useEffect(() => {
     if (!pending) return;
     setLeft(TIMEOUT_S);
+    setRemember(true);
     const t = setInterval(() => setLeft((n) => Math.max(0, n - 1)), 1000);
     return () => clearInterval(t);
   }, [pending?.id]);
   if (!pending) return null;
 
-  const answer = (allow: boolean) => void api.decide(pending.id, allow);
+  const answer = (allow: boolean) => void api.decide(pending.id, allow, remember);
 
   return (
     // Controlled: the dialog closes when the device stops being pending, and
@@ -36,11 +38,26 @@ export function DeviceDialog() {
               <AlertDialog.Title className="text-base font-semibold">Allow this {pending.label}?</AlertDialog.Title>
               <AlertDialog.Description className="mt-1 text-muted">
                 A device at <span className="font-mono text-text" data-selectable>{pending.ip}</span> scanned your code. Once allowed, it can send you files and
-                download what you share until sharing stops.
+                download what you share.
               </AlertDialog.Description>
             </div>
           </div>
-          <p className="mt-3 text-xs text-faint">Only allow a device you can see in front of you. If you don't recognise it, deny it.</p>
+          <div className="mt-4 rounded-control bg-ink px-3 py-2.5 text-center">
+            <p className="text-xs text-muted">Check that the phone shows</p>
+            <p className="font-mono text-2xl font-semibold tracking-widest" data-selectable>
+              {pending.code}
+            </p>
+          </div>
+          <p className="mt-3 text-xs text-faint">If the numbers differ, or you don't recognise the device, deny it.</p>
+          <label className="mt-4 flex items-start gap-2.5">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+            <span>
+              <span className="font-medium">Remember this device</span>
+              <span className="block text-xs text-faint">
+                It connects by itself whenever sharing is on, without asking. Untick for someone else's phone. Forget it any time in Settings.
+              </span>
+            </span>
+          </label>
           <div className="mt-5 flex items-center gap-2">
             <span className="flex-1 text-xs text-faint">Denied automatically in {left}s</span>
             <AlertDialog.Cancel asChild>

@@ -20,6 +20,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.10"
 getrandom = "0.3"
+mdns-sd = { version = "0.21", default-features = false }
 time = "0.3"
 
 [dev-dependencies]

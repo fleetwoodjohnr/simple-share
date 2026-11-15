@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
-import { api, type HistoryEntry, type Settings, type ShareEvent, type View } from "./api";
+import { api, type HistoryEntry, type Known, type Settings, type ShareEvent, type View } from "./api";
 
 export type Page = "share" | "history" | "settings";
 
@@ -19,6 +19,8 @@ interface AppState {
   settings: Settings | null;
   view: View | null;
   history: HistoryEntry[];
+  /** Remembered devices. */
+  known: Known[];
   /** Received this session, newest first, keyed by upload id. */
   transfers: Record<number, Transfer>;
   /** Offer ids a phone has fully downloaded. */
@@ -32,6 +34,7 @@ export const useApp = create<AppState>((set, get) => ({
   settings: null,
   view: null,
   history: [],
+  known: [],
   transfers: {},
   sent: {},
   setPage: (page) => set({ page }),
@@ -68,12 +71,13 @@ let started = false;
 export async function startBridge() {
   if (started) return;
   started = true;
-  const [settings, view, history] = await Promise.all([api.getSettings(), api.view(), api.history()]);
-  useApp.setState({ settings, view, history });
+  const [settings, view, history, known] = await Promise.all([api.getSettings(), api.view(), api.history(), api.knownDevices()]);
+  useApp.setState({ settings, view, history, known });
   await listen<View>("view", (e) => {
     useApp.setState({ view: e.payload });
     if (!e.payload.on) useApp.setState({ transfers: {}, sent: {} });
   });
   await listen<ShareEvent>("share-event", (e) => onEvent(e.payload));
   await listen("history", async () => useApp.setState({ history: await api.history() }));
+  await listen("known", async () => useApp.setState({ known: await api.knownDevices() }));
 }

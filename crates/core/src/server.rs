@@ -1,11 +1,14 @@
 //! The HTTPS server phones talk to while sharing is on.
 //!
-//! Access works like this: the QR code on the computer carries a one-session
-//! token. Opening it creates a *pending* device and gives the browser a secret
+//! Access works like this: the QR code on the computer carries a token that
+//! works for one scan. Opening it creates a *pending* device, shows the same
+//! 6-digit code on the phone and the computer, and gives the browser a secret
 //! cookie; nothing more is possible until the person at the computer allows
-//! that device. Every request must use our exact `IP:PORT` as its Host (no DNS
-//! rebinding), state-changing requests need a custom header (no CSRF), and no
-//! CORS headers are ever sent.
+//! that device. A device allowed with "Remember" keeps its cookie, and the
+//! computer keeps only its SHA-256, so it is let in again in later sessions.
+//! Every request must use our exact `name.local:PORT` or `IP:PORT` as its Host
+//! (no DNS rebinding), state-changing requests need a custom header (no CSRF),
+//! and no CORS headers are ever sent.
 
 use crate::save;
 use crate::tls::Ca;
@@ -33,7 +36,10 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// How long a device may wait for an answer before it is turned away.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-const COOKIE: &str = "ss";
+/// `__Host-`: the browser only accepts it from this exact host, over HTTPS.
+const COOKIE: &str = "__Host-ss";
+/// The longest a browser keeps a cookie (Chrome's cap). Refreshed each session.
+const COOKIE_DAYS: u64 = 400;
 const CSRF_HEADER: &str = "x-simple-share";
 
 #[derive(Debug, Clone)]
@@ -60,6 +66,23 @@ pub struct Device {
     pub label: String,
     pub ip: IpAddr,
     pub status: Status,
+    /// Shown on the phone and on the computer while it waits, so the right device is allowed.
+    pub code: String,
+    /// The `Known` id, for a remembered device.
+    pub known: Option<String>,
+}
+
+/// A device allowed with "Remember". The app stores these; only the phone has the secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Known {
+    pub id: String,
+    pub label: String,
+    /// SHA-256 of the device's cookie secret.
+    pub hash: String,
+    /// Unix seconds.
+    pub added: u64,
+    pub last_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +104,14 @@ pub enum Event {
     },
     DeviceExpired {
         id: u64,
+    },
+    /// Allowed with "Remember": the app should store it.
+    Remembered {
+        known: Known,
+    },
+    /// A remembered device connected; no approval was needed.
+    Returned {
+        device: Device,
     },
     Progress {
         upload: u64,
@@ -112,11 +143,16 @@ pub enum Event {
 }
 
 struct Inner {
-    host: String,
-    token: String,
+    /// `label.local:port`, the address phones normally use.
+    local_host: String,
+    /// `ip:port`, for phones that cannot look up `.local` names.
+    ip_host: String,
+    token: Mutex<String>,
     ca_der: Vec<u8>,
     config: Mutex<Config>,
+    /// Keyed by cookie secret. Lock order: `devices`, then `known`.
     devices: Mutex<HashMap<String, Device>>,
+    known: Mutex<Vec<Known>>,
     offers: Mutex<Vec<Offer>>,
     events: mpsc::UnboundedSender<Event>,
     changed: watch::Sender<bool>, // value: session ended
@@ -134,6 +170,26 @@ fn random_hex(bytes: usize) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+fn sha256_hex(s: &str) -> String {
+    format!("{:x}", Sha256::digest(s.as_bytes()))
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+fn code() -> String {
+    let mut b = [0u8; 4];
+    getrandom::fill(&mut b).expect("the OS random number generator failed");
+    let n = u32::from_le_bytes(b) % 1_000_000;
+    format!("{:03} {:03}", n / 1000, n % 1000)
+}
+
+fn cookie(secret: &str) -> HeaderValue {
+    let v = format!("{COOKIE}={secret}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", COOKIE_DAYS * 86_400);
+    HeaderValue::from_str(&v).expect("hex is a valid header value")
+}
+
 /// Constant-time comparison for secrets.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -147,6 +203,34 @@ pub fn lan_ip() -> Option<IpAddr> {
     s.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
+/// Listen on `ip:port`. macOS lets ordinary apps use ports below 1024 (443)
+/// only when listening on every address; `OnlyTo` then turns away connections
+/// that were not sent to `ip`, such as over a VPN.
+fn listen(ip: IpAddr, port: u16) -> std::io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind((ip, port));
+    #[cfg(target_os = "macos")]
+    if matches!(&listener, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied) {
+        let any: IpAddr = if ip.is_ipv4() { std::net::Ipv4Addr::UNSPECIFIED.into() } else { std::net::Ipv6Addr::UNSPECIFIED.into() };
+        return std::net::TcpListener::bind((any, port));
+    }
+    listener
+}
+
+/// Drops connections that did not arrive at the shared address, before TLS.
+#[derive(Clone, Copy)]
+struct OnlyTo(IpAddr);
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for OnlyTo {
+    type Stream = tokio::net::TcpStream;
+    type Service = S;
+    type Future = std::future::Ready<std::io::Result<(Self::Stream, S)>>;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let to_us = stream.local_addr().is_ok_and(|a| a.ip() == self.0);
+        std::future::ready(if to_us { Ok((stream, service)) } else { Err(std::io::ErrorKind::PermissionDenied.into()) })
+    }
+}
+
 /// A running share session. Dropping it does not stop the server; call `stop`.
 pub struct Share {
     inner: Arc<Inner>,
@@ -155,19 +239,30 @@ pub struct Share {
 }
 
 impl Share {
-    /// Start serving on `ip:port`. Returns the session and its event stream.
-    pub fn start(ca: &Ca, ip: IpAddr, port: u16, config: Config) -> Result<(Self, mpsc::UnboundedReceiver<Event>), Error> {
+    /// Start serving on `ip:port` as `label.local`, letting in the `known`
+    /// devices without asking. Returns the session and its event stream.
+    pub fn start(
+        ca: &Ca,
+        ip: IpAddr,
+        port: u16,
+        config: Config,
+        known: Vec<Known>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), Error> {
         let tls = ca.server_config(ip)?;
-        let listener = std::net::TcpListener::bind((ip, port))?;
+        let listener = listen(ip, port)?;
         listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
+        let addr = SocketAddr::new(ip, listener.local_addr()?.port());
+        // Browsers leave out the standard HTTPS port, in the address and in Host.
+        let host = |h: String| h.strip_suffix(":443").map_or(h.clone(), str::to_owned);
         let (events, rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            host: addr.to_string(),
-            token: random_hex(16),
+            local_host: host(format!("{}:{}", crate::tls::local_name(ca.label()), addr.port())),
+            ip_host: host(addr.to_string()),
+            token: Mutex::new(random_hex(16)),
             ca_der: ca.der.clone(),
             config: Mutex::new(config),
             devices: Mutex::new(HashMap::new()),
+            known: Mutex::new(known),
             offers: Mutex::new(Vec::new()),
             events,
             changed: watch::channel(false).0,
@@ -176,7 +271,9 @@ impl Share {
         });
         let app = router(inner.clone());
         let handle = axum_server::Handle::new();
-        let server = axum_server::from_tcp_rustls(listener, axum_server::tls_rustls::RustlsConfig::from_config(tls)).handle(handle.clone());
+        let tls =
+            axum_server::tls_rustls::RustlsAcceptor::new(axum_server::tls_rustls::RustlsConfig::from_config(tls)).acceptor(OnlyTo(ip));
+        let server = axum_server::from_tcp(listener).acceptor(tls).handle(handle.clone());
         tokio::spawn(async move {
             if let Err(e) = server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await {
                 tracing::error!(error = %e, "share server stopped");
@@ -185,23 +282,58 @@ impl Share {
         Ok((Self { inner, handle, addr }, rx))
     }
 
-    /// What the QR code encodes.
+    /// What the QR code encodes. The token inside works for one scan.
     pub fn join_url(&self) -> String {
-        format!("https://{}/j/{}", self.inner.host, self.inner.token)
+        format!("https://{}/j/{}", self.inner.local_host, lock(&self.inner.token))
     }
 
-    pub fn decide(&self, id: u64, allow: bool) {
+    /// The same, by IP address, for phones that cannot look up `.local` names.
+    pub fn ip_join_url(&self) -> String {
+        format!("https://{}/j/{}", self.inner.ip_host, lock(&self.inner.token))
+    }
+
+    /// Answer a waiting device. With `remember`, it is let in without asking
+    /// from now on, and `Event::Remembered` carries what to store.
+    pub fn decide(&self, id: u64, allow: bool, remember: bool) {
         let mut devices = lock(&self.inner.devices);
-        if let Some(d) = devices.values_mut().find(|d| d.id == id && d.status == Status::Pending) {
-            d.status = if allow { Status::Allowed } else { Status::Denied };
-        }
+        let Some((secret, d)) = devices.iter_mut().find(|(_, d)| d.id == id && d.status == Status::Pending) else { return };
+        d.status = if allow { Status::Allowed } else { Status::Denied };
+        let known = (allow && remember).then(|| Known {
+            id: random_hex(8),
+            label: d.label.clone(),
+            hash: sha256_hex(secret),
+            added: now(),
+            last_used: now(),
+        });
+        d.known = known.as_ref().map(|k| k.id.clone());
         drop(devices);
+        if let Some(known) = known {
+            lock(&self.inner.known).push(known.clone());
+            let _ = self.inner.events.send(Event::Remembered { known });
+        }
         self.inner.changed.send_modify(|_| ());
     }
 
-    /// Turn away a device that was allowed earlier.
-    pub fn revoke(&self, id: u64) {
-        lock(&self.inner.devices).retain(|_, d| d.id != id);
+    /// Turn away a device that was allowed earlier, and forget it if it was
+    /// remembered. Returns the `Known` id that was forgotten.
+    pub fn revoke(&self, id: u64) -> Option<String> {
+        let mut devices = lock(&self.inner.devices);
+        let known = devices.values().find(|d| d.id == id).and_then(|d| d.known.clone());
+        devices.retain(|_, d| d.id != id);
+        drop(devices);
+        if let Some(k) = &known {
+            lock(&self.inner.known).retain(|x| &x.id != k);
+        }
+        self.inner.changed.send_modify(|_| ());
+        known
+    }
+
+    /// Replace the remembered devices. Connected devices that are no longer
+    /// on the list lose access at once.
+    pub fn set_known(&self, known: Vec<Known>) {
+        let ids: Vec<String> = known.iter().map(|k| k.id.clone()).collect();
+        *lock(&self.inner.known) = known;
+        lock(&self.inner.devices).retain(|_, d| d.known.as_ref().is_none_or(|k| ids.contains(k)));
         self.inner.changed.send_modify(|_| ());
     }
 
@@ -267,15 +399,30 @@ fn router(inner: Arc<Inner>) -> Router {
         .with_state(inner)
 }
 
-/// Runs on every request: Host check, activity time, security headers.
+/// Runs on every request: Host check, remembered devices, activity time,
+/// security headers.
 async fn guard(State(s): State<Arc<Inner>>, req: Request, next: Next) -> Response {
-    let host_ok = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).is_some_and(|h| h == s.host);
-    if !host_ok {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let local = host == s.local_host;
+    if !local && host != s.ip_host {
         return (StatusCode::MISDIRECTED_REQUEST, "Wrong address.").into_response();
     }
     *lock(&s.last_activity) = Instant::now();
+    let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+    let returned = peer.and_then(|ip| let_in_remembered(&s, req.headers(), ip));
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
+    if let Some(secret) = returned {
+        h.append(header::SET_COOKIE, cookie(&secret));
+    }
+    if local {
+        // Browsers ignore this over a connection with a certificate warning and
+        // for IP addresses, so it only binds phones that verified us (paired):
+        // for them, a forged certificate becomes a hard stop with no "continue".
+        h.insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000"));
+    }
+    h.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    h.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
@@ -309,6 +456,34 @@ fn cookie_secret(headers: &HeaderMap) -> Option<String> {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .find_map(|kv| kv.trim().strip_prefix(&format!("{COOKIE}=")).map(str::to_string))
+}
+
+/// A remembered device's first request this session: let it in as allowed.
+/// Returns its secret, so the cookie's lifetime can be renewed.
+fn let_in_remembered(s: &Inner, headers: &HeaderMap, ip: IpAddr) -> Option<String> {
+    let secret = cookie_secret(headers)?;
+    let mut devices = lock(&s.devices);
+    if devices.keys().any(|k| same(k, &secret)) {
+        return None;
+    }
+    let hash = sha256_hex(&secret);
+    let mut known = lock(&s.known);
+    let k = known.iter_mut().find(|k| same(&k.hash, &hash))?;
+    k.last_used = now();
+    let d = Device {
+        id: s.next_id.fetch_add(1, Ordering::Relaxed),
+        label: k.label.clone(),
+        ip,
+        status: Status::Allowed,
+        code: String::new(),
+        known: Some(k.id.clone()),
+    };
+    drop(known);
+    devices.insert(secret.clone(), d.clone());
+    drop(devices);
+    let _ = s.events.send(Event::Returned { device: d });
+    s.changed.send_modify(|_| ());
+    Some(secret)
 }
 
 fn device(s: &Inner, headers: &HeaderMap) -> Option<Device> {
@@ -348,15 +523,31 @@ async fn join(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !same(&token, &s.token) {
-        return (StatusCode::NOT_FOUND, "This link has expired. Scan the code on the computer again.").into_response();
-    }
     let home = [(header::LOCATION, HeaderValue::from_static("/"))];
-    if device(&s, &headers).is_some() {
-        return (StatusCode::SEE_OTHER, home).into_response();
+    match device(&s, &headers) {
+        Some(d) if d.status != Status::Denied => return (StatusCode::SEE_OTHER, home).into_response(),
+        // Denied earlier: a fresh scan asks again, as a new device.
+        Some(d) => lock(&s.devices).retain(|_, x| x.id != d.id),
+        None => {}
     }
-    let secret = random_hex(16);
-    let d = Device { id: s.next_id.fetch_add(1, Ordering::Relaxed), label: label(&headers), ip: peer.ip(), status: Status::Pending };
+    {
+        // One scan per code: whoever opens it first uses it up, and the
+        // computer shows a new one. A photo of the screen is worthless.
+        let mut current = lock(&s.token);
+        if !same(&token, &current) {
+            return (StatusCode::NOT_FOUND, "This code has been used. Scan the code on the computer again.").into_response();
+        }
+        *current = random_hex(16);
+    }
+    let secret = random_hex(32);
+    let d = Device {
+        id: s.next_id.fetch_add(1, Ordering::Relaxed),
+        label: label(&headers),
+        ip: peer.ip(),
+        status: Status::Pending,
+        code: code(),
+        known: None,
+    };
     lock(&s.devices).insert(secret.clone(), d.clone());
     let _ = s.events.send(Event::DeviceRequest { device: d.clone() });
     s.changed.send_modify(|_| ());
@@ -372,11 +563,8 @@ async fn join(
             s2.changed.send_modify(|_| ());
         }
     });
-    let cookie = format!("{COOKIE}={secret}; HttpOnly; Secure; SameSite=Strict; Path=/");
     let mut resp = (StatusCode::SEE_OTHER, home).into_response();
-    if let Ok(v) = HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, v);
-    }
+    resp.headers_mut().insert(header::SET_COOKIE, cookie(&secret));
     resp
 }
 
@@ -385,6 +573,9 @@ async fn join(
 struct StateView {
     name: String,
     status: Status,
+    /// While pending: the code the computer shows too.
+    code: Option<String>,
+    remembered: bool,
     offers: Vec<Offer>,
     max_upload: u64,
 }
@@ -395,7 +586,15 @@ async fn state(State(s): State<Arc<Inner>>, headers: HeaderMap) -> Response {
     };
     let cfg = lock(&s.config).clone();
     let offers = if d.status == Status::Allowed { lock(&s.offers).clone() } else { Vec::new() };
-    Json(StateView { name: cfg.name, status: d.status, offers, max_upload: cfg.max_upload }).into_response()
+    Json(StateView {
+        name: cfg.name,
+        status: d.status,
+        code: (d.status == Status::Pending).then_some(d.code),
+        remembered: d.known.is_some(),
+        offers,
+        max_upload: cfg.max_upload,
+    })
+    .into_response()
 }
 
 /// Server-sent events: "changed" whenever the phone should refetch its state,
@@ -581,47 +780,66 @@ fn mime_for(name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    //! Real HTTPS on 127.0.0.1, with a client that trusts only our CA.
+    //! Real HTTPS on 127.0.0.1 as `testlabel.local`, with a client that trusts only our CA.
     use super::*;
     use reqwest::header::{CONTENT_LENGTH, HOST};
+
+    const LABEL: &str = "testlabel";
 
     struct Fixture {
         share: Share,
         events: mpsc::UnboundedReceiver<Event>,
-        ca: Vec<u8>,
+        ca: Ca,
         dest: PathBuf,
         base: String,
     }
 
-    fn fixture(tag: &str, max_upload: u64) -> Fixture {
-        let root = std::env::temp_dir().join(format!("simple-share-srv-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let ca = Ca::create(&root.join("ca")).expect("ca");
-        let dest = root.join("in");
-        let cfg = Config { name: "Test PC".into(), dest: dest.clone(), max_upload };
-        let (share, events) = Share::start(&ca, "127.0.0.1".parse().expect("ip"), 0, cfg).expect("start");
-        let base = format!("https://{}", share.addr);
-        Fixture { share, events, ca: ca.der.clone(), dest, base }
+    fn root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("simple-share-srv-{tag}-{}", std::process::id()))
     }
 
-    fn client(f: &Fixture) -> reqwest::Client {
+    fn start(ca: Ca, dest: PathBuf, max_upload: u64, known: Vec<Known>) -> Fixture {
+        let cfg = Config { name: "Test PC".into(), dest: dest.clone(), max_upload };
+        let (share, events) = Share::start(&ca, "127.0.0.1".parse().expect("ip"), 0, cfg, known).expect("start");
+        let base = format!("https://{LABEL}.local:{}", share.addr.port());
+        Fixture { share, events, ca, dest, base }
+    }
+
+    fn fixture(tag: &str, max_upload: u64) -> Fixture {
+        let root = root(tag);
+        let _ = std::fs::remove_dir_all(&root);
+        let ca = Ca::create(&root.join("ca"), LABEL).expect("ca");
+        start(ca, root.join("in"), max_upload, Vec::new())
+    }
+
+    fn builder(f: &Fixture) -> reqwest::ClientBuilder {
         reqwest::Client::builder()
             .use_rustls_tls()
             .tls_built_in_root_certs(false)
-            .add_root_certificate(reqwest::Certificate::from_der(&f.ca).expect("cert"))
+            .add_root_certificate(reqwest::Certificate::from_der(&f.ca.der).expect("cert"))
+            // Stands in for mDNS: the port comes from the URL.
+            .resolve(&format!("{LABEL}.local"), f.share.addr)
             .cookie_store(true)
-            .build()
-            .expect("client")
     }
 
-    /// Scan the QR code: returns the device id the computer was asked about.
-    async fn join(f: &mut Fixture, c: &reqwest::Client) -> u64 {
+    fn client(f: &Fixture) -> reqwest::Client {
+        builder(f).build().expect("client")
+    }
+
+    /// Scan the QR code: returns the device the computer was asked about.
+    async fn join(f: &mut Fixture, c: &reqwest::Client) -> Device {
         let r = c.get(f.share.join_url()).send().await.expect("join");
         assert_eq!(r.status(), 200, "redirected to the page");
         match f.events.recv().await {
-            Some(Event::DeviceRequest { device }) => device.id,
+            Some(Event::DeviceRequest { device }) => device,
             other => panic!("expected a device request, got {other:?}"),
         }
+    }
+
+    async fn state(c: &reqwest::Client, f: &Fixture) -> (u16, serde_json::Value) {
+        let r = c.get(format!("{}/api/state", f.base)).send().await.expect("state");
+        let code = r.status().as_u16();
+        (code, r.json().await.unwrap_or_default())
     }
 
     async fn put(c: &reqwest::Client, f: &Fixture, name: &str, body: Vec<u8>) -> reqwest::Response {
@@ -636,16 +854,67 @@ mod tests {
     async fn strangers_get_nothing() {
         let f = fixture("strangers", 1 << 20);
         let c = client(&f);
-        assert_eq!(c.get(format!("{}/api/state", f.base)).send().await.expect("state").status(), 401);
+        assert_eq!(state(&c, &f).await.0, 401);
         assert_eq!(c.get(format!("{}/j/{}", f.base, "0".repeat(32))).send().await.expect("join").status(), 404);
         let wrong_host = c.get(format!("{}/", f.base)).header(HOST, "attacker.example").send().await.expect("rebind");
         assert_eq!(wrong_host.status(), 421, "DNS rebinding is refused");
         assert_eq!(put(&c, &f, "a.txt", b"x".to_vec()).await.status(), 401);
         let page = c.get(format!("{}/", f.base)).send().await.expect("page");
-        let csp = page.headers().get("content-security-policy").expect("csp").to_str().expect("str").to_string();
+        let h = page.headers();
+        let csp = h.get("content-security-policy").expect("csp").to_str().expect("str").to_string();
         assert!(csp.contains("script-src 'self'") && csp.contains("frame-ancestors 'none'"));
-        assert_eq!(page.headers().get("referrer-policy").expect("referrer"), "no-referrer");
-        assert!(page.headers().get("access-control-allow-origin").is_none());
+        assert_eq!(h.get("referrer-policy").expect("referrer"), "no-referrer");
+        assert_eq!(h.get("strict-transport-security").expect("hsts"), "max-age=31536000");
+        assert_eq!(h.get("cross-origin-resource-policy").expect("corp"), "same-origin");
+        assert!(h.get("access-control-allow-origin").is_none());
+
+        // The IP address works too, without HSTS (browsers ignore it for IPs).
+        let by_ip = c.get(format!("https://{}/", f.share.addr)).send().await.expect("ip");
+        assert_eq!(by_ip.status(), 200);
+        assert!(by_ip.headers().get("strict-transport-security").is_none());
+        f.share.stop();
+    }
+
+    #[tokio::test]
+    async fn connections_to_other_addresses_are_dropped() {
+        use axum_server::accept::Accept;
+        // Listening on every address, as on macOS for port 443; the share is on 127.0.0.1.
+        let l = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        for (to, ok) in [("127.0.0.1", true), ("127.0.0.2", false)] {
+            let _c = tokio::net::TcpStream::connect((to, port)).await.expect("connect");
+            let (s, _) = l.accept().await.expect("accept");
+            assert_eq!(OnlyTo("127.0.0.1".parse().expect("ip")).accept(s, ()).await.is_ok(), ok, "{to}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tls_1_2_is_refused() {
+        let f = fixture("tls12", 1 << 20);
+        let old = builder(&f).max_tls_version(reqwest::tls::Version::TLS_1_2).build().expect("client");
+        assert!(old.get(format!("{}/", f.base)).send().await.is_err(), "TLS 1.3 only");
+        assert_eq!(client(&f).get(format!("{}/", f.base)).send().await.expect("1.3").status(), 200);
+        f.share.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_code_works_for_one_scan_and_shows_a_matching_number() {
+        let mut f = fixture("token", 1 << 20);
+        let used = f.share.join_url();
+        let (phone, other) = (client(&f), client(&f));
+        let d = join(&mut f, &phone).await;
+        let (_, s) = state(&phone, &f).await;
+        assert_eq!(s["status"], "pending");
+        assert_eq!(s["code"], d.code, "the phone shows the code the computer shows");
+        assert_eq!(d.code.len(), 7);
+        assert_eq!(other.get(&used).send().await.expect("again").status(), 404, "a used code is worthless");
+        assert_ne!(f.share.join_url(), used, "the computer shows a new one");
+
+        // Denied, then a fresh scan asks again.
+        f.share.decide(d.id, false, false);
+        assert_eq!(state(&phone, &f).await.1["status"], "denied");
+        let again = join(&mut f, &phone).await;
+        assert_ne!(again.id, d.id);
         f.share.stop();
     }
 
@@ -653,12 +922,10 @@ mod tests {
     async fn approved_device_uploads_are_saved_safely() {
         let mut f = fixture("upload", 8 << 20);
         let c = client(&f);
-        let id = join(&mut f, &c).await;
-        let s: serde_json::Value = c.get(format!("{}/api/state", f.base)).send().await.expect("s").json().await.expect("json");
-        assert_eq!(s["status"], "pending");
+        let d = join(&mut f, &c).await;
         assert_eq!(put(&c, &f, "a.txt", b"x".to_vec()).await.status(), 403, "pending devices cannot upload");
 
-        f.share.decide(id, true);
+        f.share.decide(d.id, true, false);
         let no_csrf = c.put(format!("{}/api/upload?name=a.txt", f.base)).body("x").send().await.expect("put");
         assert_eq!(no_csrf.status(), 403, "custom header required");
 
@@ -681,14 +948,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn remembered_devices_come_back_without_asking() {
+        let mut f = fixture("remember", 1 << 20);
+        let (phone, guest) = (client(&f), client(&f));
+        let d = join(&mut f, &phone).await;
+        f.share.decide(d.id, true, true);
+        let known = match f.events.recv().await {
+            Some(Event::Remembered { known }) => known,
+            other => panic!("expected remembered, got {other:?}"),
+        };
+        assert_eq!(known.label, d.label);
+        assert_eq!(known.hash.len(), 64, "only a hash is kept");
+        let (_, s) = state(&phone, &f).await;
+        assert_eq!((s["status"].as_str(), s["remembered"].as_bool()), (Some("allowed"), Some(true)));
+        let g = join(&mut f, &guest).await;
+        f.share.decide(g.id, true, false);
+        f.share.stop();
+
+        // Next session: new port, no QR code, no question.
+        let Fixture { ca, dest, .. } = f;
+        let mut f = start(ca, dest, 1 << 20, vec![known.clone()]);
+        let page = phone.get(format!("{}/", f.base)).send().await.expect("page");
+        assert!(page.headers().get("set-cookie").is_some_and(|v| v.to_str().is_ok_and(|v| v.contains("Max-Age="))), "cookie renewed");
+        match f.events.recv().await {
+            Some(Event::Returned { device }) => assert_eq!(device.known.as_deref(), Some(known.id.as_str())),
+            other => panic!("expected returned, got {other:?}"),
+        }
+        assert_eq!(state(&phone, &f).await.1["status"], "allowed");
+        assert_eq!(state(&guest, &f).await.0, 401, "allowed once is not remembered");
+
+        // Forgetting cuts it off at once.
+        f.share.set_known(Vec::new());
+        assert_eq!(state(&phone, &f).await.0, 401);
+        f.share.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_remembered_device_forgets_it() {
+        let mut f = fixture("revoke", 1 << 20);
+        let phone = client(&f);
+        let d = join(&mut f, &phone).await;
+        f.share.decide(d.id, true, true);
+        let Some(Event::Remembered { known }) = f.events.recv().await else { panic!("remembered") };
+        assert_eq!(f.share.revoke(d.id), Some(known.id));
+        assert_eq!(state(&phone, &f).await.0, 401, "not let back in");
+        f.share.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn oversize_and_broken_uploads_leave_nothing_behind() {
         let mut f = fixture("limits", 1000);
         let c = client(&f);
-        let id = join(&mut f, &c).await;
-        f.share.decide(id, true);
+        let d = join(&mut f, &c).await;
+        f.share.decide(d.id, true, false);
         assert_eq!(put(&c, &f, "big.bin", vec![0u8; 2000]).await.status(), 413);
 
-        // Announce 5000 bytes, send 1000, then hang up.
+        // Announce 1000 bytes, send 900, then hang up.
         let short = futures_util::stream::iter([Ok::<_, std::io::Error>(vec![1u8; 900])]);
         let _ = c
             .put(format!("{}/api/upload?name=short.bin", f.base))
@@ -711,10 +1026,10 @@ mod tests {
         let offer = f.share.offer(shared).expect("offer");
 
         let c = client(&f);
-        let id = join(&mut f, &c).await;
+        let d = join(&mut f, &c).await;
         let url = format!("{}/api/files/{}", f.base, offer.id);
         assert_eq!(c.get(&url).send().await.expect("get").status(), 403, "pending devices see nothing");
-        f.share.decide(id, true);
+        f.share.decide(d.id, true, false);
         let r = c.get(&url).send().await.expect("get");
         assert_eq!(r.status(), 200);
         assert_eq!(r.headers().get("content-type").expect("ct"), "application/pdf");

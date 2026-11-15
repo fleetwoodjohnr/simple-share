@@ -5,6 +5,17 @@ export interface Device {
   label: string;
   ip: string;
   status: "pending" | "allowed" | "denied";
+  /** Shown on the phone too, while it waits. */
+  code: string;
+  /** Set for a remembered device. */
+  known: string | null;
+}
+/** A device allowed with "Remember"; it connects without asking. */
+export interface Known {
+  id: string;
+  label: string;
+  added: number;
+  lastUsed: number;
 }
 export interface Offer {
   id: string;
@@ -12,17 +23,24 @@ export interface Offer {
   size: number;
   mime: string;
 }
-export type Firewall = { state: "notManaged" } | { state: "open" } | { state: "blocked"; zone: string };
+export type Firewall = { state: "notManaged" } | { state: "open" } | { state: "blocked"; zone: string; port: boolean; mdns: boolean };
 export interface View {
   on: boolean;
   url: string | null;
   qr: string | null;
+  /** The same code by IP address, for phones that can't open .local names. */
+  ipUrl: string | null;
+  ipQr: string | null;
+  /** Why the code uses the IP address, when it does. */
+  notice: string | null;
   devices: Device[];
   offers: Offer[];
   firewall: Firewall;
 }
 export interface Settings {
   deviceName: string;
+  /** Phones reach this computer at hostName.local. */
+  hostName: string;
   receiveDir: string;
   port: number;
   idleMinutes: number;
@@ -31,11 +49,13 @@ export interface Settings {
   theme: "system" | "light" | "dark";
   startInTray: boolean;
   checkUpdates: boolean;
-  firewallRule: { zone: string; port: number } | null;
+  firewallRule: { zone: string; port: number; mdns: boolean } | null;
 }
 export type ShareEvent =
   | { type: "deviceRequest"; device: Device }
   | { type: "deviceExpired"; id: number }
+  | { type: "remembered"; known: Known }
+  | { type: "returned"; device: Device }
   | { type: "progress"; upload: number; device: string; name: string; done: number; total: number }
   | { type: "saved"; upload: number; device: string; path: string; size: number; sha256: string }
   | { type: "failed"; upload: number; device: string; name: string; error: string }
@@ -53,8 +73,11 @@ export const api = {
   view: () => invoke<View>("view"),
   startSharing: () => invoke<View>("start_sharing"),
   stopSharing: () => invoke<void>("stop_sharing"),
-  decide: (id: number, allow: boolean) => invoke<void>("decide", { id, allow }),
+  decide: (id: number, allow: boolean, remember: boolean) => invoke<void>("decide", { id, allow, remember }),
   revoke: (id: number) => invoke<void>("revoke", { id }),
+  knownDevices: () => invoke<Known[]>("known_devices"),
+  forgetDevices: (ids: string[]) => invoke<void>("forget_devices", { ids }),
+  newAddress: () => invoke<Settings>("new_address"),
   offerFiles: (paths: string[]) => invoke<void>("offer_files", { paths }),
   withdraw: (id: string) => invoke<void>("withdraw", { id }),
   getSettings: () => invoke<Settings>("get_settings"),

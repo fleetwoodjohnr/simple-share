@@ -14,8 +14,9 @@ install, no account, no cloud service, no cable. Part of Simple Suite.
   photos and videos can go straight into the iPhone's Photos app.
 * **Works with anything that has a browser:** iPhone, iPad, Android, Chromebooks, and
   other Windows, Mac or Linux computers.
-* **Only devices you allow.** Every phone that scans the code must be allowed on the
-  computer first. Access ends when you stop sharing.
+* **Only devices you allow.** Every new phone must be allowed on the computer first,
+  after checking that both screens show the same code. Phones you remember connect by
+  themselves next time; forget them any time in Settings.
 * **Private and encrypted.** Files go directly between the two devices over HTTPS
   and never leave your network.
 * **Lives in the tray** (the menu bar on macOS), keeps itself up to date, and runs on
@@ -23,11 +24,16 @@ install, no account, no cloud service, no cable. Part of Simple Suite.
 
 ## How it works
 
-1. Click **Start sharing** on the computer. A QR code appears.
-2. Scan it with the phone's camera and open the link.
-3. The computer asks **Allow this iPhone?** Check it's your phone and click **Allow**.
-4. Send and receive. The phone stays allowed until sharing stops, either when you click
-   **Stop sharing** or automatically after 15 minutes without activity.
+1. Click **Start sharing** on the computer. A QR code appears for this computer's own
+   address, a random name like `https://k7m3x9p2q.local` (on Linux with a port number,
+   like `https://k7m3x9p2q.local:47645`).
+2. Scan it with the phone's camera and open the link. Each code works for one scan.
+3. The computer asks **Allow this iPhone?** and both screens show the same 6-digit code.
+   Check they match and click **Allow**. Leave **Remember this device** ticked and that
+   phone never has to ask again.
+4. Send and receive. Sharing stops when you click **Stop sharing**, or by itself after
+   15 minutes without activity. Next time, a remembered phone just opens its bookmark
+   (or scans the code) and is connected straight away.
 
 | The computer asks first | On the phone |
 |---|---|
@@ -69,8 +75,10 @@ sharing, allow Simple Share through Windows Firewall on **Private networks**.
 
 **macOS.** Open the DMG and drag Simple Share to Applications. It isn't notarised by
 Apple, so the first launch is blocked. Open **System Settings → Privacy & Security**,
-scroll down and click **Open Anyway**. If the macOS firewall is on and asks whether
-Simple Share may accept incoming connections, click **Allow**.
+scroll down and click **Open Anyway**. When macOS asks whether Simple Share may find
+devices on your local network, click **Allow**: phones use that to find it by name. If
+the macOS firewall is on and asks whether Simple Share may accept incoming connections,
+click **Allow** too.
 
 **Linux.** From the folder you downloaded to:
 
@@ -81,8 +89,9 @@ chmod +x ./*Simple.Share_*.AppImage && ./*Simple.Share_*.AppImage   # anything e
 ```
 
 On Fedora and other systems that use firewalld, Simple Share shows **Allow** when the
-firewall would block phones. One password prompt opens only its single port, and
-Settings → Firewall removes the rule again. GNOME shows tray icons only with the
+firewall would block phones. One password prompt opens only its single port, plus mDNS
+if it isn't allowed yet (phones need it to find the `.local` name), and Settings →
+Firewall removes the rule again. GNOME shows tray icons only with the
 *AppIndicator and KStatusNotifierItem Support* extension. Ubuntu includes it; on Fedora,
 install `gnome-shell-extension-appindicator`. Without a tray, closing the window quits
 the app.
@@ -104,15 +113,23 @@ again. On Linux, deb and rpm updates ask for your password.
 
 ## Security
 
-* **Encrypted, always.** Every connection is HTTPS (TLS 1.2/1.3).
+* **Encrypted, always.** Every connection is HTTPS with TLS 1.3 only, so there is
+  nothing older to downgrade to.
 * **Verified once paired.** Paired phones get a verified connection with no warning, so
-  nobody else on the network can intercept or alter transfers. The certificate is
-  *name-constrained*: it can only vouch for private network addresses, never for a
-  website, so installing it can't be used to spy on the phone's other traffic. The
-  phone enforces this, and tests cover it.
-* **Nothing without your OK.** The QR code holds a one-time secret for this session.
-  Each device that uses it must then be allowed on the computer, and is denied
-  automatically after 2 minutes. Stopping sharing ends every device's access.
+  nobody else on the network can intercept or alter transfers. Once paired, the phone
+  also remembers (HSTS) to refuse any other certificate for this address outright,
+  with no "continue anyway". The certificate is *name-constrained*: it can only vouch
+  for this computer's own `.local` name and private network addresses, never for a
+  website or another device's name, so installing it can't be used to spy on the
+  phone's other traffic. The phone enforces this, and tests cover it.
+* **Nothing without your OK.** Each QR code works for one scan, then the computer shows
+  a new one, so a photo of the screen is useless. The device that used it must then be
+  allowed on the computer after you check that both screens show the same 6-digit
+  code, and is denied automatically after 2 minutes.
+* **Remembered safely.** A remembered phone holds a 256-bit key in a cookie only this
+  address can read or set (`__Host-`, HttpOnly, Secure, SameSite=Strict). The computer
+  keeps only its SHA-256, in files only you can read. Forget a phone in Settings and it
+  is cut off at once; phones unused for a year are forgotten automatically.
 * **Hardened server.** Exact Host check (no DNS rebinding), a CSRF header on uploads,
   no CORS, a strict Content-Security-Policy, no-referrer and no-store.
 * **Safe saving.** File names are reduced to a safe bare name, and nothing is ever
@@ -123,13 +140,26 @@ again. On Linux, deb and rpm updates ask for your password.
   ID.
 * **Closed when idle.** Nothing listens until you start, and sharing stops itself after
   15 minutes without activity.
+* **Found by name, only while sharing.** The `.local` name is announced (mDNS) only on
+  the network you share on, only while sharing is on, and carries no personal details.
+  If another device ever answers to it, Simple Share warns you and uses the IP address.
 * No accounts, no telemetry. The only connection to the internet is the update check.
 
 ## Limits
 
 * Both devices must be on the same network. Guest or hotel Wi-Fi with "client
   isolation" blocks devices from reaching each other.
-* Unpaired phones see the browser's warning once per session. Pairing removes it.
+* Unpaired phones see the browser's warning once per session. Pairing removes it. Until
+  a phone is paired, a person who controls your network could intercept that first
+  connection, so pair the phones you use often.
+* Android 11 and older, and some networks that block mDNS, can't open `.local`
+  addresses. Use **Phone can't open it? Use the IP address** under the code.
+* An iPhone Home Screen web app keeps its own cookies, separate from Safari, so it needs
+  allowing once more from there. A Safari bookmark has no such problem.
+* Choosing **New address** in Settings, or resetting the certificate, means phones must
+  pair (and, for a new address, be allowed) again.
+* On Linux the address includes a port number (`:47645`): Linux keeps port 443, the one
+  that needs no number, for system services. Windows and macOS use 443 when it's free.
 * iOS may convert HEIC photos to JPEG when picking them from the photo library.
 
 ## Build from source

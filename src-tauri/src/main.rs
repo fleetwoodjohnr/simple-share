@@ -7,7 +7,8 @@ mod store;
 mod tray;
 
 use share::{App, View, lock};
-use simple_share_core::tls::Ca;
+use simple_share_core::server::Known;
+use simple_share_core::tls::{self, Ca};
 use std::path::PathBuf;
 use std::sync::Arc;
 use store::{FirewallRule, HistoryEntry, Settings};
@@ -33,15 +34,47 @@ fn stop_sharing(app: AppState<'_>) {
 }
 
 #[tauri::command]
-fn decide(app: AppState<'_>, id: u64, allow: bool) {
-    app.with_share(|s| s.decide(id, allow));
+fn decide(app: AppState<'_>, id: u64, allow: bool, remember: bool) {
+    app.with_share(|s| s.decide(id, allow, remember));
     app.emit_view();
 }
 
+/// Turn a connected device away; a remembered one is forgotten too.
 #[tauri::command]
 fn revoke(app: AppState<'_>, id: u64) {
-    app.with_share(|s| s.revoke(id));
-    app.emit_view();
+    match app.with_share(|s| s.revoke(id)).flatten() {
+        Some(known) => share::forget(&app, &[known]),
+        None => app.emit_view(),
+    }
+}
+
+#[tauri::command]
+fn known_devices(app: AppState<'_>) -> Vec<Known> {
+    lock(&app.known).clone()
+}
+
+#[tauri::command]
+fn forget_devices(app: AppState<'_>, ids: Vec<String>) {
+    share::forget(&app, &ids);
+}
+
+/// A new random `.local` name. Cookies and pairing belong to the old one, so
+/// this also makes a new certificate and forgets every device.
+#[tauri::command]
+fn new_address(app: AppState<'_>) -> Result<Settings, String> {
+    share::stop(&app);
+    let label = tls::new_label();
+    let ca = Ca::load_or_create(&app.dir, &label).map_err(|e| e.to_string())?;
+    let settings = {
+        let mut s = lock(&app.settings);
+        s.host_name = label;
+        store::save(&app.dir.join("settings.json"), &*s)?;
+        s.clone()
+    };
+    *lock(&app.ca) = ca;
+    let all: Vec<String> = lock(&app.known).iter().map(|k| k.id.clone()).collect();
+    share::forget(&app, &all);
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -81,9 +114,13 @@ fn save_settings(app: AppState<'_>, settings: Settings) -> Result<Settings, Stri
     if !(1..=240).contains(&settings.idle_minutes) || !(1..=65_536).contains(&settings.max_upload_mb) {
         return Err("That value is out of range.".into());
     }
-    // The firewall rule is only ever changed by its own buttons.
+    // The firewall rule and the address are only ever changed by their own buttons.
     let mut settings = settings;
-    settings.firewall_rule = lock(&app.settings).firewall_rule.clone();
+    {
+        let current = lock(&app.settings);
+        settings.firewall_rule = current.firewall_rule.clone();
+        settings.host_name = current.host_name.clone();
+    }
     store::save(&app.dir.join("settings.json"), &settings)?;
     *lock(&app.settings) = settings.clone();
     app.with_share(|s| s.set_config(app.config()));
@@ -110,7 +147,8 @@ fn fingerprint(app: AppState<'_>) -> String {
 #[tauri::command]
 fn reset_certificate(app: AppState<'_>) -> Result<String, String> {
     share::stop(&app);
-    let ca = Ca::create(&app.dir).map_err(|e| e.to_string())?;
+    let label = lock(&app.settings).host_name.clone();
+    let ca = Ca::create(&app.dir, &label).map_err(|e| e.to_string())?;
     let fp = ca.fingerprint();
     *lock(&app.ca) = ca;
     Ok(fp)
@@ -121,10 +159,12 @@ async fn allow_firewall(app: AppState<'_>) -> Result<View, String> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let port = lock(&app.settings).port;
-        if let firewall::Firewall::Blocked { zone } = firewall::check(port) {
-            firewall::allow(&zone, port)?;
+        if let firewall::Firewall::Blocked { zone, mdns, .. } = firewall::check(port) {
+            firewall::allow(&zone, port, mdns)?;
             let mut s = lock(&app.settings);
-            s.firewall_rule = Some(FirewallRule { zone, port });
+            // Keep "we added mDNS" from an earlier Allow in the same zone.
+            let had_mdns = s.firewall_rule.as_ref().is_some_and(|r| r.zone == zone && r.mdns);
+            s.firewall_rule = Some(FirewallRule { zone, port, mdns: mdns || had_mdns });
             store::save(&app.dir.join("settings.json"), &*s)?;
         }
         Ok(app.view())
@@ -139,7 +179,7 @@ async fn remove_firewall_rule(app: AppState<'_>) -> Result<Settings, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let rule = lock(&app.settings).firewall_rule.clone();
         if let Some(r) = rule {
-            firewall::remove(&r.zone, r.port)?;
+            firewall::remove(&r)?;
         }
         let saved = {
             let mut s = lock(&app.settings);
@@ -207,6 +247,9 @@ fn main() {
             stop_sharing,
             decide,
             revoke,
+            known_devices,
+            forget_devices,
+            new_address,
             offer_files,
             withdraw,
             get_settings,

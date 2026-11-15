@@ -2,10 +2,10 @@
 //!
 //! Phones that "pair" install this CA once and then get a verified, warning-free
 //! HTTPS connection. The CA is name-constrained: it can only vouch for private
-//! IP addresses (and one unusable DNS name, which shuts out every real one), so
-//! even a stolen CA key cannot impersonate a public website to a paired phone.
-//! Unpaired "guest" phones still get an encrypted connection after Safari's
-//! warning.
+//! IP addresses and for this computer's one `.local` name, so even a stolen CA
+//! key cannot impersonate a website, or any other device's `.local` name, to a
+//! paired phone. Unpaired "guest" phones still get an encrypted connection
+//! after the browser's warning.
 
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair,
@@ -26,12 +26,32 @@ pub struct Ca {
     key: KeyPair,
     /// Exactly what phones install; persisted so the fingerprint never changes.
     pub der: Vec<u8>,
+    label: String,
 }
 
-/// The CA's identity. Rebuilt identically to sign leaves: a leaf names its
-/// issuer by subject and key identifier, both of which depend only on these
-/// params and the key, so leaves chain to the persisted certificate.
-fn ca_params() -> CertificateParams {
+/// A new random `.local` label: 9 characters without look-alikes (0 o 1 l i).
+pub fn new_label() -> String {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let mut out = String::new();
+    while out.len() < 9 {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).expect("the OS random number generator failed");
+        // 248 = 8 × 31: rejecting larger bytes keeps every character equally likely.
+        out.extend(b.iter().filter(|&&x| x < 248).map(|&x| ALPHABET[usize::from(x) % ALPHABET.len()] as char));
+        out.truncate(9);
+    }
+    out
+}
+
+/// `label` → `label.local`, the only DNS name the CA may vouch for.
+pub fn local_name(label: &str) -> String {
+    format!("{label}.local")
+}
+
+/// The CA's identity. Rebuilt to sign leaves: a leaf names its issuer by
+/// subject and key identifier, both of which depend only on the subject and the
+/// key, so leaves chain to the persisted certificate.
+fn ca_params(label: &str) -> CertificateParams {
     let mut p = CertificateParams::default();
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "Simple Share local certificate");
@@ -55,9 +75,8 @@ fn ca_params() -> CertificateParams {
             v4([127, 0, 0, 0], [255, 0, 0, 0]),
             v6(0xfc00, 7),
             v6(0xfe80, 10),
-            // Constraining DNS names to a reserved, unresolvable domain means no
-            // real hostname can ever be covered by a certificate from this CA.
-            GeneralSubtree::DnsName("simple-share.invalid".into()),
+            // Exactly this computer's name: no website, no other `.local` device.
+            GeneralSubtree::DnsName(local_name(label)),
         ],
         excluded_subtrees: Vec::new(),
     });
@@ -82,24 +101,35 @@ pub fn is_permitted(ip: IpAddr) -> bool {
 }
 
 impl Ca {
-    /// Load the CA from `dir`, creating it on first use.
-    pub fn load_or_create(dir: &Path) -> Result<Self, Error> {
+    /// Load the CA for `label.local` from `dir`. A CA made for another name
+    /// (or by Simple Share 0.1, which named none) cannot vouch for this one,
+    /// so it is replaced.
+    pub fn load_or_create(dir: &Path, label: &str) -> Result<Self, Error> {
         let (key_path, cert_path) = (dir.join(KEY_FILE), dir.join(CERT_FILE));
         if let (Ok(pem), Ok(der)) = (std::fs::read_to_string(&key_path), std::fs::read(&cert_path)) {
-            return Ok(Self { key: KeyPair::from_pem(&pem)?, der });
+            // The name sits in the certificate verbatim, as an IA5String in its name constraints.
+            let name = local_name(label);
+            if der.windows(name.len()).any(|w| w == name.as_bytes()) {
+                return Ok(Self { key: KeyPair::from_pem(&pem)?, der, label: label.into() });
+            }
         }
-        Self::create(dir)
+        Self::create(dir, label)
     }
 
     /// A brand-new CA. Phones paired with the old one will see the warning
     /// again until they install the new certificate.
-    pub fn create(dir: &Path) -> Result<Self, Error> {
+    pub fn create(dir: &Path, label: &str) -> Result<Self, Error> {
         std::fs::create_dir_all(dir)?;
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-        let der = ca_params().self_signed(&key)?.der().to_vec();
+        let der = ca_params(label).self_signed(&key)?.der().to_vec();
         write_private(&dir.join(KEY_FILE), key.serialize_pem().as_bytes())?;
         std::fs::write(dir.join(CERT_FILE), &der)?;
-        Ok(Self { key, der })
+        Ok(Self { key, der, label: label.into() })
+    }
+
+    /// The `label` in `label.local` this CA vouches for.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// SHA-256 of the CA certificate, as iOS shows it under the profile's
@@ -108,14 +138,14 @@ impl Ca {
         Sha256::digest(&self.der).iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
     }
 
-    /// A fresh server certificate and key for `ip`, valid for 30 days.
+    /// A fresh server certificate and key for `label.local` and `ip`, valid for 30 days.
     pub fn issue(&self, ip: IpAddr) -> Result<(Vec<u8>, Vec<u8>), Error> {
-        let issuer = ca_params().self_signed(&self.key)?;
+        let issuer = ca_params(&self.label).self_signed(&self.key)?;
         let mut p = CertificateParams::default();
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Simple Share");
         p.distinguished_name = dn;
-        p.subject_alt_names = vec![SanType::IpAddress(ip)];
+        p.subject_alt_names = vec![SanType::DnsName(local_name(&self.label).try_into()?), SanType::IpAddress(ip)];
         p.is_ca = IsCa::ExplicitNoCa;
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -128,12 +158,13 @@ impl Ca {
         Ok((cert.der().to_vec(), key.serialize_der()))
     }
 
-    /// rustls config serving a fresh certificate for `ip`.
+    /// rustls config serving a fresh certificate for `ip`. TLS 1.3 only: every
+    /// browser that can run the phone page has it, and it leaves nothing to downgrade to.
     pub fn server_config(&self, ip: IpAddr) -> Result<Arc<rustls::ServerConfig>, Error> {
         let (cert, key) = self.issue(ip)?;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let cfg = rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()?
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
             .with_single_cert(
                 vec![cert.into()],
@@ -143,7 +174,8 @@ impl Ca {
     }
 }
 
-fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+/// Write a file only its owner can read (0600 on Unix).
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -176,7 +208,7 @@ mod tests {
     /// Sign an arbitrary leaf with the CA's key, as an attacker holding a
     /// stolen key would.
     fn forge(ca: &Ca, san: SanType) -> Vec<u8> {
-        let issuer = ca_params().self_signed(&ca.key).expect("issuer");
+        let issuer = ca_params(&ca.label).self_signed(&ca.key).expect("issuer");
         let mut p = CertificateParams::default();
         p.subject_alt_names = vec![san];
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -184,35 +216,43 @@ mod tests {
         p.signed_by(&key, &issuer, &ca.key).expect("sign").der().to_vec()
     }
 
+    fn dns(name: &str) -> SanType {
+        SanType::DnsName(name.try_into().expect("dns"))
+    }
+
     #[test]
-    fn leaf_for_a_lan_address_chains_to_the_persisted_ca() {
+    fn leaf_for_the_local_name_and_a_lan_address_chains_to_the_persisted_ca() {
         let dir = tmp("chain");
-        let ca = Ca::create(&dir).expect("create");
+        let ca = Ca::create(&dir, "k7m3x9p2q").expect("create");
         let (leaf, _) = ca.issue("192.168.1.20".parse().expect("ip")).expect("issue");
-        verify(&ca.der, &leaf, "192.168.1.20").expect("valid");
+        verify(&ca.der, &leaf, "k7m3x9p2q.local").expect("valid for the name");
+        verify(&ca.der, &leaf, "192.168.1.20").expect("valid for the address");
         // Your network's carrier-grade NAT range works too.
         let (leaf, _) = ca.issue("100.110.198.227".parse().expect("ip")).expect("issue");
         verify(&ca.der, &leaf, "100.110.198.227").expect("valid");
         assert!(verify(&ca.der, &leaf, "192.168.1.21").is_err(), "wrong address");
+        assert!(verify(&ca.der, &leaf, "other.local").is_err(), "wrong name");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_stolen_ca_key_cannot_impersonate_public_sites() {
+    fn a_stolen_ca_key_cannot_impersonate_sites_or_other_local_devices() {
         let dir = tmp("constraints");
-        let ca = Ca::create(&dir).expect("create");
-        let public_ip = forge(&ca, SanType::IpAddress("8.8.8.8".parse().expect("ip")));
-        assert!(matches!(verify(&ca.der, &public_ip, "8.8.8.8"), Err(e) if format!("{e:?}").contains("NameConstraint")));
-        let domain = forge(&ca, SanType::DnsName("www.apple.com".try_into().expect("dns")));
-        assert!(matches!(verify(&ca.der, &domain, "www.apple.com"), Err(e) if format!("{e:?}").contains("NameConstraint")));
+        let ca = Ca::create(&dir, "k7m3x9p2q").expect("create");
+        let refused =
+            |leaf: &[u8], name: &str| matches!(verify(&ca.der, leaf, name), Err(e) if format!("{e:?}").contains("NameConstraint"));
+        assert!(refused(&forge(&ca, SanType::IpAddress("8.8.8.8".parse().expect("ip"))), "8.8.8.8"));
+        assert!(refused(&forge(&ca, dns("www.apple.com")), "www.apple.com"));
+        assert!(refused(&forge(&ca, dns("nas.local")), "nas.local"), "another device's .local name");
+        assert!(refused(&forge(&ca, dns("k7m3x9p2q-2.local")), "k7m3x9p2q-2.local"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reloading_keeps_the_same_ca_and_still_signs() {
         let dir = tmp("reload");
-        let first = Ca::create(&dir).expect("create");
-        let again = Ca::load_or_create(&dir).expect("load");
+        let first = Ca::create(&dir, "k7m3x9p2q").expect("create");
+        let again = Ca::load_or_create(&dir, "k7m3x9p2q").expect("load");
         assert_eq!(first.fingerprint(), again.fingerprint());
         let (leaf, _) = again.issue("10.0.0.5".parse().expect("ip")).expect("issue");
         verify(&first.der, &leaf, "10.0.0.5").expect("leaf from reloaded CA chains to the original");
@@ -223,6 +263,26 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600, "CA key must be private");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_ca_for_another_name_is_replaced() {
+        let dir = tmp("rename");
+        let old = Ca::create(&dir, "k7m3x9p2q").expect("create");
+        let new = Ca::load_or_create(&dir, "w4h8n2r6t").expect("load");
+        assert_ne!(old.fingerprint(), new.fingerprint(), "a new address gets a new CA");
+        let (leaf, _) = new.issue("10.0.0.5".parse().expect("ip")).expect("issue");
+        verify(&new.der, &leaf, "w4h8n2r6t.local").expect("valid for the new name");
+        assert_eq!(Ca::load_or_create(&dir, "w4h8n2r6t").expect("again").fingerprint(), new.fingerprint());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_are_nine_unambiguous_characters() {
+        let a = new_label();
+        assert_eq!(a.len(), 9);
+        assert!(a.chars().all(|c| "abcdefghjkmnpqrstuvwxyz23456789".contains(c)), "{a}");
+        assert_ne!(a, new_label());
     }
 
     #[test]

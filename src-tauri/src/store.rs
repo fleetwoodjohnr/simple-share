@@ -14,7 +14,8 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)).map_err(|e| e.to_string())
+    // Only this user may read them: device keys' hashes, folders, history.
+    simple_share_core::tls::write_private(&tmp, &json).and_then(|()| std::fs::rename(&tmp, path)).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,8 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 pub struct Settings {
     /// Shown on phones as "Send to …".
     pub device_name: String,
+    /// Phones reach this computer at `host_name.local`. Random, made once.
+    pub host_name: String,
     pub receive_dir: PathBuf,
     pub port: u16,
     /// Sharing stops after this long without any phone activity.
@@ -42,6 +45,9 @@ pub struct Settings {
 pub struct FirewallRule {
     pub zone: String,
     pub port: u16,
+    /// Simple Share also allowed mDNS, so phones can look up the `.local` name.
+    #[serde(default)]
+    pub mdns: bool,
 }
 
 impl Default for Settings {
@@ -54,6 +60,7 @@ impl Default for Settings {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
         Self {
             device_name: if host.is_empty() { "this computer".into() } else { host },
+            host_name: String::new(),
             receive_dir: home.join("Downloads"),
             port: 47645,
             idle_minutes: 15,

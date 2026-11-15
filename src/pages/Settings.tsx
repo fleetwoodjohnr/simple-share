@@ -36,11 +36,12 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 }
 
 export function SettingsPage() {
-  const { settings, view, saveSettings } = useApp();
+  const { settings, view, known, saveSettings } = useApp();
   const [name, setName] = useState(settings?.deviceName ?? "");
   const [port, setPort] = useState(String(settings?.port ?? ""));
   const [fingerprint, setFingerprint] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmAddress, setConfirmAddress] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [autostart, setAutostartState] = useState(false);
   const [version, setVersion] = useState("");
@@ -92,6 +93,43 @@ export function SettingsPage() {
             Change…
           </Button>
         </div>
+        <div className="mt-4 flex items-center gap-4">
+          <div className="flex-1">
+            <p className="font-medium">Address on your network</p>
+            <p className="font-mono text-muted" data-selectable>
+              {settings.hostName}.local
+            </p>
+          </div>
+          <Button onClick={() => setConfirmAddress(true)}>New address…</Button>
+        </div>
+      </Card>
+
+      <Card title="Allowed devices">
+        {known.length === 0 ? (
+          <p className="text-muted">Devices you allow with Remember are listed here. They connect by themselves whenever sharing is on.</p>
+        ) : (
+          <>
+            <ul>
+              {known.map((k) => (
+                <li key={k.id} className="flex items-center gap-4 border-b border-line py-2.5 last:border-0">
+                  <div className="flex-1">
+                    <p className="font-medium">{k.label}</p>
+                    <p className="text-xs text-faint">
+                      Allowed {new Date(k.added * 1000).toLocaleDateString()} · last connected {new Date(k.lastUsed * 1000).toLocaleString()}
+                    </p>
+                  </div>
+                  <Button variant="ghost" onClick={() => void api.forgetDevices([k.id])}>
+                    Forget
+                  </Button>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-faint">Forget a phone you no longer use, or have lost. Devices unused for a year are forgotten automatically.</p>
+            <Button className="mt-3" onClick={() => void api.forgetDevices(known.map((k) => k.id))}>
+              Forget all
+            </Button>
+          </>
+        )}
       </Card>
 
       <Card title="General">
@@ -126,7 +164,10 @@ export function SettingsPage() {
             ))}
           </select>
         </Row>
-        <Row label="Port" hint="Change it only if another program uses this one. Takes effect next time you start sharing.">
+        <Row
+          label="Port"
+          hint="Used on Linux, and on Windows and macOS only when the standard port 443 is taken. Change it only if another program uses this one. Takes effect next time you start sharing."
+        >
           <input
             className={`${inputClass.replace("w-full", "w-24")} font-mono`}
             inputMode="numeric"
@@ -150,8 +191,8 @@ export function SettingsPage() {
           {fingerprint}
         </code>
         <p className="mt-3 text-xs text-faint">
-          The certificate can only vouch for addresses on private networks, never for websites, so installing it can't be used to spy on a phone's other
-          traffic.
+          The certificate can only vouch for {settings.hostName}.local and addresses on private networks, never for websites or other devices' names, so
+          installing it can't be used to spy on a phone's other traffic. Once paired, a phone refuses any other certificate for this address outright.
         </p>
         <Button className="mt-3" onClick={() => setConfirmReset(true)}>
           Reset certificate…
@@ -219,9 +260,20 @@ export function SettingsPage() {
         open={confirmReset}
         onOpenChange={setConfirmReset}
         title="Reset the certificate?"
-        description="Sharing stops, and phones that installed the old certificate will see the security warning again until they install the new one. Remove the old Simple Share profile from them."
+        description="Sharing stops. Paired phones won't open the .local address until they install the new certificate: on the Share page, choose “Phone can't open it? Use the IP address”, and pair again from there. Remove the old Simple Share profile from them."
         confirmLabel="Reset certificate"
         onConfirm={async () => setFingerprint(await api.resetCertificate())}
+      />
+      <ConfirmDialog
+        open={confirmAddress}
+        onOpenChange={setConfirmAddress}
+        title="Choose a new address?"
+        description="Sharing stops and this computer gets a new random .local address with a new certificate. Every phone will need to be allowed and paired again, and bookmarks to the old address stop working. Use this if another device answers to this computer's address."
+        confirmLabel="New address"
+        onConfirm={async () => {
+          useApp.setState({ settings: await api.newAddress() });
+          setFingerprint(await api.fingerprint());
+        }}
       />
     </>
   );

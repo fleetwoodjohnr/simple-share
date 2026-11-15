@@ -53,12 +53,15 @@ async function refresh() {
   $("peer").textContent = "Connected to " + state.name;
   if (state.status === "pending") {
     $("wait-name").textContent = state.name;
+    $("wait-code").textContent = state.code || "";
     show("wait");
   } else if (state.status === "denied") {
     show("denied");
   } else {
     $("to-name").textContent = state.name;
     $("from-name").textContent = state.name;
+    $("remembered").hidden = !state.remembered;
+    $("address").textContent = location.origin;
     renderOffers();
     show("ready");
   }
